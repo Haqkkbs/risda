@@ -1,0 +1,57 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: notes
+// Document ID: auto-generated
+// Fields:
+//   - text: string (required, 1-500 chars) - The note content
+//   - createdAt: timestamp (required) - Creation time
+//   - authorId: string (optional) - UID of the creator
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidNote(data) {
+      return data.keys().hasAll(['text', 'createdAt']) &&
+             data.text is string && data.text.size() > 0 && data.text.size() <= 500 &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /notes/{noteId} {
+      // Allow anyone to read notes so they see them when entering the page
+      // (User requested "bila org masuk webpage ni")
+      allow read: if true;
+      
+      // Allow authenticated users to create notes
+      allow create: if isAuthenticated() && isValidNote(request.resource.data) &&
+                    (!('authorId' in request.resource.data) || request.resource.data.authorId == request.auth.uid);
+      
+      // Allow owners to delete their own notes
+      allow delete: if isAuthenticated() && resource.data.authorId == request.auth.uid;
+      
+      // Updates not allowed for simplicity in this note-taking app
+      allow update: if false;
+    }
+    
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

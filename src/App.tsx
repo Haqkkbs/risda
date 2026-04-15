@@ -34,8 +34,81 @@ import {
   Rocket,
   ShieldCheck,
   FileText,
-  Lock
+  Lock,
+  LogIn,
+  LogOut
 } from 'lucide-react';
+import { db, auth, loginWithGoogle } from './firebase';
+import { 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  serverTimestamp,
+  Timestamp
+} from 'firebase/firestore';
+import { onAuthStateChanged, User as FirebaseUser, signOut } from 'firebase/auth';
+
+interface Note {
+  id: string;
+  text: string;
+  authorId?: string;
+  createdAt: Timestamp;
+}
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 interface Slide {
   id: number;
@@ -48,10 +121,61 @@ interface Slide {
 export default function App() {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [direction, setDirection] = useState(0);
-  const [questions, setQuestions] = useState<string[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [newQuestion, setNewQuestion] = useState('');
   const [activeTip, setActiveTip] = useState<number | null>(null);
   const [selectedSpeaker, setSelectedSpeaker] = useState<number | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    const q = query(collection(db, 'notes'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notesData: Note[] = [];
+      snapshot.forEach((doc) => {
+        notesData.push({ id: doc.id, ...doc.data() } as Note);
+      });
+      setNotes(notesData);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'notes');
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady]);
+
+  const addQuestion = async () => {
+    if (newQuestion.trim() && user) {
+      const noteText = newQuestion.trim();
+      setNewQuestion('');
+      try {
+        await addDoc(collection(db, 'notes'), {
+          text: noteText,
+          createdAt: serverTimestamp(),
+          authorId: user.uid
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, 'notes');
+      }
+    }
+  };
+
+  const removeQuestion = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'notes', id));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `notes/${id}`);
+    }
+  };
 
   const speakers = useMemo(() => [
     {
@@ -170,17 +294,6 @@ export default function App() {
       ]
     }
   ], []);
-
-  const addQuestion = () => {
-    if (newQuestion.trim()) {
-      setQuestions([...questions, newQuestion.trim()]);
-      setNewQuestion('');
-    }
-  };
-
-  const removeQuestion = (index: number) => {
-    setQuestions(questions.filter((_, i) => i !== index));
-  };
 
   const slides: Slide[] = useMemo(() => [
     {
@@ -714,45 +827,65 @@ export default function App() {
                 <MessageSquare className="text-brand-accent w-6 h-6" /> Nota Projek
               </h4>
               <div className="flex-1 overflow-y-auto space-y-4 mb-8 custom-scrollbar pr-4">
-                {questions.length === 0 ? (
+                {notes.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-20 text-slate-200">
                     <Plus className="w-16 h-16 mb-6 opacity-20" />
                     <p className="text-lg italic font-bold text-slate-400">Sedia untuk mencatat...</p>
                   </div>
                 ) : (
-                  questions.map((q, i) => (
+                  notes.map((note) => (
                     <motion.div 
                       initial={{ opacity: 0, x: 20 }}
                       animate={{ opacity: 1, x: 0 }}
-                      key={i} 
+                      key={note.id} 
                       className="p-6 bg-slate-50 rounded-3xl text-slate-700 flex justify-between items-start group hover:bg-white hover:shadow-sm transition-all border border-transparent hover:border-slate-100"
                     >
-                      <span className="leading-relaxed font-medium text-lg">{q}</span>
-                      <button 
-                        onClick={() => removeQuestion(i)}
-                        className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all ml-6"
-                      >
-                        <Trash2 className="w-5 h-5" />
-                      </button>
+                      <span className="leading-relaxed font-medium text-lg">{note.text}</span>
+                      {user && note.authorId === user.uid && (
+                        <button 
+                          onClick={() => removeQuestion(note.id)}
+                          className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all ml-6"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      )}
                     </motion.div>
                   ))
                 )}
               </div>
               <div className="flex gap-4">
-                <input 
-                  type="text" 
-                  value={newQuestion}
-                  onChange={(e) => setNewQuestion(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && addQuestion()}
-                  placeholder="Taip nota di sini..."
-                  className="flex-1 px-8 py-6 bg-slate-50 rounded-3xl text-xl focus:outline-none focus:ring-2 focus:ring-brand-accent transition-all border border-slate-100"
-                />
-                <button 
-                  onClick={addQuestion}
-                  className="w-16 h-16 bg-brand-primary text-white rounded-3xl flex items-center justify-center hover:bg-brand-accent transition-all shadow-lg"
-                >
-                  <Plus className="w-8 h-8" />
-                </button>
+                {!user ? (
+                  <button 
+                    onClick={loginWithGoogle}
+                    className="flex-1 px-8 py-6 bg-brand-primary text-white rounded-3xl text-xl font-bold flex items-center justify-center gap-4 hover:bg-brand-accent transition-all shadow-lg"
+                  >
+                    <LogIn className="w-6 h-6" /> Log Masuk untuk Mencatat
+                  </button>
+                ) : (
+                  <>
+                    <input 
+                      type="text" 
+                      value={newQuestion}
+                      onChange={(e) => setNewQuestion(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && addQuestion()}
+                      placeholder="Taip nota di sini..."
+                      className="flex-1 px-8 py-6 bg-slate-50 rounded-3xl text-xl focus:outline-none focus:ring-2 focus:ring-brand-accent transition-all border border-slate-100"
+                    />
+                    <button 
+                      onClick={addQuestion}
+                      className="w-16 h-16 bg-brand-primary text-white rounded-3xl flex items-center justify-center hover:bg-brand-accent transition-all shadow-lg"
+                    >
+                      <Plus className="w-8 h-8" />
+                    </button>
+                    <button 
+                      onClick={() => signOut(auth)}
+                      title="Log Keluar"
+                      className="w-16 h-16 bg-slate-100 text-slate-400 rounded-3xl flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-all"
+                    >
+                      <LogOut className="w-6 h-6" />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -836,7 +969,7 @@ export default function App() {
         </div>
       )
     }
-  ], [questions, newQuestion, activeTip]);
+  ], [notes, newQuestion, activeTip, user]);
 
   const nextSlide = useCallback(() => {
     if (currentSlide < slides.length - 1) {
